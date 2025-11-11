@@ -4,6 +4,7 @@ import argparse
 import math
 import multiprocessing as mp
 import os
+import signal
 import subprocess
 import sys
 
@@ -67,6 +68,9 @@ def proc_init(task_pipeline_copy, verbose1_copy, verbose2_copy):
     verbose1_copy -- verbose1 flag
     verbose2_copy -- verbose2 flag
     """
+    # Ignore SIGINT in worker processes; let the main process handle it
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+
     global task_pipeline
     global verbose1
     global verbose2
@@ -200,6 +204,51 @@ def proc_batch(files):
     return all_success
 
 
+def run_pool(task_pipeline, args, items, worker_func, task_base_class):
+    """Spawns process pool to run a set of tasks using a worker.
+
+    Keyword arguments:
+    task_pipeline -- task pipeline
+    args -- command line arguments from argparse
+    items -- list of items to process (files or file batches)
+    worker_func -- the worker function to call (proc_pipeline, proc_batch, or proc_standalone)
+    task_base_class -- the base class tasks must inherit from (PipelineTask, BatchTask, or StandaloneTask)
+
+    Calls sys.exit(1) if any task fails or if invalid tasks are found.
+    """
+    init_args = (task_pipeline, args.verbose1, args.verbose2)
+
+    # Check tasks are all of the correct type
+    invalid_tasks = [
+        type(task).__name__
+        for task in task_pipeline
+        if not issubclass(type(task), task_base_class)
+    ]
+    if invalid_tasks:
+        print(
+            f"error: the following {task_base_class.__name__} tasks are invalid: {invalid_tasks}"
+        )
+        sys.exit(1)
+
+    try:
+        with mp.Pool(args.jobs, proc_init, init_args) as pool:
+            # Use map_async and poll with short timeout for responsive interrupts
+            async_result = pool.map_async(worker_func, items)
+
+            while True:
+                try:
+                    results = async_result.get(timeout=1)
+                    break
+                except mp.TimeoutError:
+                    continue
+
+            if not all(results):
+                sys.exit(1)
+    except KeyboardInterrupt:
+        print("\n\nInterrupted by user", file=sys.stderr)
+        sys.exit(1)
+
+
 def run_pipeline(task_pipeline, args, files):
     """Spawns process pool for proc_pipeline().
 
@@ -210,24 +259,7 @@ def run_pipeline(task_pipeline, args, files):
 
     Calls sys.exit(1) if any task fails.
     """
-    init_args = (task_pipeline, args.verbose1, args.verbose2)
-
-    # Check tasks are all pipeline tasks
-    invalid_tasks = [
-        type(task).__name__
-        for task in task_pipeline
-        if not issubclass(type(task), PipelineTask)
-    ]
-    if invalid_tasks:
-        print(f"error: the following pipeline tasks are invalid: {invalid_tasks}")
-        sys.exit(1)
-
-    with mp.Pool(args.jobs, proc_init, init_args) as pool:
-        # Start worker processes for task pipeline
-        results = pool.map(proc_pipeline, files)
-
-        if not all(results):
-            sys.exit(1)
+    run_pool(task_pipeline, args, files, proc_pipeline, PipelineTask)
 
 
 def run_batch(task_pipeline, args, file_batches):
@@ -240,24 +272,7 @@ def run_batch(task_pipeline, args, file_batches):
 
     Calls sys.exit(1) if any task fails.
     """
-    init_args = (task_pipeline, args.verbose1, args.verbose2)
-
-    # Check tasks are all batch tasks
-    invalid_tasks = [
-        type(task).__name__
-        for task in task_pipeline
-        if not issubclass(type(task), BatchTask)
-    ]
-    if invalid_tasks:
-        print(f"error: the following batch tasks are invalid: {invalid_tasks}")
-        sys.exit(1)
-
-    with mp.Pool(args.jobs, proc_init, init_args) as pool:
-        # Start worker processes for batch tasks
-        results = pool.map(proc_batch, file_batches)
-
-        if not all(results):
-            sys.exit(1)
+    run_pool(task_pipeline, args, file_batches, proc_batch, BatchTask)
 
 
 def run_standalone(task_pipeline, args, files):
@@ -270,24 +285,7 @@ def run_standalone(task_pipeline, args, files):
 
     Calls sys.exit(1) if any task fails.
     """
-    init_args = (task_pipeline, args.verbose1, args.verbose2)
-
-    # Check tasks are all standalone tasks
-    invalid_tasks = [
-        type(task).__name__
-        for task in task_pipeline
-        if not issubclass(type(task), StandaloneTask)
-    ]
-    if invalid_tasks:
-        print(f"error: the following standalone tasks are invalid: {invalid_tasks}")
-        sys.exit(1)
-
-    with mp.Pool(args.jobs, proc_init, init_args) as pool:
-        # Start worker processes for standalone tasks
-        results = pool.map(proc_standalone, files)
-
-        if not all(results):
-            sys.exit(1)
+    run_pool(task_pipeline, args, files, proc_standalone, StandaloneTask)
 
 
 def main():
